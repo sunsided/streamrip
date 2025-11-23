@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use reqwest::Client;
+use reqwest::header::CONTENT_TYPE;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
@@ -34,7 +35,11 @@ struct Mirror {
 impl Mirror {
     fn new(out_dir: PathBuf, master_url_path_components: Vec<String>) -> Self {
         let client = Client::builder()
-            .user_agent("stream-mirror/0.1")
+            .user_agent(format!(
+                "{}/{}",
+                env!("CARGO_PKG_NAME"),
+                env!("CARGO_PKG_VERSION")
+            ))
             .build()
             .expect("failed to build reqwest client");
 
@@ -128,6 +133,102 @@ impl Mirror {
         parts.join("/")
     }
 
+    /// Detect stream type from HTTP Content-Type (HLS vs DASH), with
+    /// extension-based fallback, then delegate to the proper handler.
+    async fn mirror_root(&mut self, url: Url) -> Result<()> {
+        #[derive(Debug)]
+        enum StreamKind {
+            Hls,
+            Dash,
+        }
+
+        // Try to detect via Content-Type first.
+        let resp = self
+            .client
+            .get(url.clone())
+            .send()
+            .await
+            .with_context(|| format!("GET (for type detection) {}", url))?
+            .error_for_status()
+            .with_context(|| format!("status error (for type detection) {}", url))?;
+
+        let ctype = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_ascii_lowercase());
+
+        // We drop the body here; the real handler will fetch again.
+        // (Could be optimized later to reuse the body.)
+        drop(resp);
+
+        let mut kind: Option<StreamKind> = None;
+
+        if let Some(ref ct) = ctype {
+            // Common HLS types
+            if ct.starts_with("application/vnd.apple.mpegurl")
+                || ct.starts_with("application/x-mpegurl")
+                || ct.starts_with("audio/mpegurl")
+                || ct.starts_with("audio/x-mpegurl")
+            {
+                kind = Some(StreamKind::Hls);
+            } else if ct.starts_with("application/dash+xml") {
+                kind = Some(StreamKind::Dash);
+            }
+        }
+
+        // Fallback to file extension if Content-Type was missing/ambiguous.
+        if kind.is_none() {
+            let ext = url
+                .path()
+                .rsplit('.')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+
+            kind = match ext.as_str() {
+                "m3u8" => Some(StreamKind::Hls),
+                "mpd" => Some(StreamKind::Dash),
+                _ => None,
+            };
+        }
+
+        let kind = kind.ok_or_else(|| {
+            anyhow!(
+                "Could not determine stream type from Content-Type {:?} or extension for {}",
+                ctype,
+                url
+            )
+        })?;
+
+        match kind {
+            StreamKind::Hls => {
+                #[cfg(feature = "hls")]
+                {
+                    self.mirror_manifest(url).await
+                }
+                #[cfg(not(feature = "hls"))]
+                {
+                    Err(anyhow!(
+                        "Detected HLS (m3u8) stream, but `hls` feature is disabled. Build with --features hls."
+                    ))
+                }
+            }
+            StreamKind::Dash => {
+                #[cfg(feature = "dash")]
+                {
+                    self.mirror_mpd(url).await
+                }
+                #[cfg(not(feature = "dash"))]
+                {
+                    Err(anyhow!(
+                        "Detected DASH (mpd) stream, but `dash` feature is disabled. Build with --features dash."
+                    ))
+                }
+            }
+        }
+    }
+
     async fn mirror_binary(&mut self, url: Url) -> Result<()> {
         if !self.visited.insert(url.clone()) {
             return Ok(());
@@ -156,8 +257,6 @@ impl Mirror {
         file.write_all(&bytes).await?;
         Ok(())
     }
-
-    // ===== HLS (.m3u8) support =====
 
     #[cfg(feature = "hls")]
     fn find_uri_attr(line: &str) -> Option<(usize, usize)> {
@@ -552,41 +651,7 @@ async fn main() -> Result<()> {
         .collect::<Vec<_>>();
 
     let mut mirror = Mirror::new(out_dir, master_components);
-
-    let ext = start_url
-        .path()
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    match ext.as_str() {
-        "m3u8" => {
-            #[cfg(feature = "hls")]
-            {
-                mirror.mirror_manifest(start_url).await?;
-            }
-            #[cfg(not(feature = "hls"))]
-            {
-                return Err(anyhow!(
-                    "HLS support not enabled (build with --features hls)"
-                ));
-            }
-        }
-        "mpd" => {
-            #[cfg(feature = "dash")]
-            {
-                mirror.mirror_mpd(start_url).await?;
-            }
-            #[cfg(not(feature = "dash"))]
-            {
-                return Err(anyhow!(
-                    "DASH support not enabled (build with --features dash)"
-                ));
-            }
-        }
-        other => return Err(anyhow!("Unsupported start URL extension: {}", other)),
-    }
+    mirror.mirror_root(start_url).await?;
 
     println!("Done.");
     Ok(())
