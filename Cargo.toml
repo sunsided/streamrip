@@ -3,6 +3,13 @@ name = "streamrip"
 description = "Recursively mirror an HLS (.m3u8) or DASH (.mpd) stream for local hosting"
 version = "0.1.0"
 edition = "2024"
+authors = ["Markus Mayer <widemeadows@gmail.com>"]
+license = "EUPL-1.2"
+repository = "https://github.com/sunsided/streamrip"
+documentation = "https://docs.rs/streamrip"
+readme = "README.md"
+keywords = ["hls", "dash", "video", "streaming", "downloader"]
+categories = ["command-line-utilities", "multimedia", "network-programming", "web-programming"]
 
 [features]
 default = ["hls", "dash"]
