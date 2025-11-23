@@ -10,3 +10,9 @@ segments while rewriting manifest URLs for local hosting.
 - Rewrites manifest URLs to work with local hosting
 - Handles query parameters in URLs by converting them to safe filenames
 - Preserves original manifests with `.orig` extension for reference
+
+## Example Usage
+
+```shell
+cargo run -- --start-url=https://example.com/stream/97333-f40e7a11-73a1-47df-a767-9f0bcdfb83cd.ism/manifest.m3u8 --output-dir=hls
+```
