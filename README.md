@@ -14,5 +14,6 @@ segments while rewriting manifest URLs for local hosting.
 ## Example Usage
 
 ```shell
-cargo run -- --start-url=https://example.com/stream/97333-f40e7a11-73a1-47df-a767-9f0bcdfb83cd.ism/manifest.m3u8 --output-dir=hls
+streamrip --start-url=https://example.com/stream/97333-f40e7a11-73a2-47df-a767-9f0bcdfb83cd.ism/manifest.m3u8 --output-dir=hls
+streamrip --start-url=https://example.com/stream/97333-f40e7a11-73a2-47df-a767-9f0bcdfb83cd.ism/manifest.mpd --output-dir=dash
 ```
