@@ -13,7 +13,10 @@ use url::Url;
 use roxmltree::{Document, Node};
 
 #[derive(Parser, Debug)]
-#[command(about = "Recursively mirror an HLS (.m3u8) or DASH (.mpd) stream for local hosting")]
+#[command(
+    version,
+    about = "Recursively mirror an HLS (.m3u8) or DASH (.mpd) stream for local hosting"
+)]
 struct Args {
     /// Starting manifest URL (master .m3u8 or .mpd)
     #[arg(short, long)]
