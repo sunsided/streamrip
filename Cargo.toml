@@ -1,15 +1,20 @@
 [package]
 name = "streamrip"
-description = "Recursively mirror video streams and rewrite manifests for local hosting"
+description = "Recursively mirror an HLS (.m3u8) or DASH (.mpd) stream for local hosting"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["hls", "dash"]
+dash = ["dep:roxmltree"]
+hls = ["dep:async-recursion", "dep:pathdiff"]
+
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["rustls-tls"] }
-clap = { version = "4", features = ["derive"] }
-url = "2"
 anyhow = "1"
-pathdiff = "0.2"
-async-recursion = "1.1.1"
-roxmltree = "0.21.1"
+async-recursion = { version = "1.1.1", optional = true }
+clap = { version = "4", features = ["derive"] }
+pathdiff = { version = "0.2", optional = true }
+reqwest = { version = "0.12", features = ["rustls-tls"] }
+roxmltree = { version = "0.21.1", optional = true }
+tokio = { version = "1", features = ["full"] }
+url = "2"

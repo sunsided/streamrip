@@ -1,14 +1,13 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-
 use anyhow::{Context, Result, anyhow};
-use async_recursion::async_recursion;
 use clap::Parser;
-use pathdiff::diff_paths;
 use reqwest::Client;
-use roxmltree::{Document, Node};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use url::Url;
+
+#[cfg(feature = "dash")]
+use roxmltree::{Document, Node};
 
 #[derive(Parser, Debug)]
 #[command(about = "Recursively mirror an HLS (.m3u8) or DASH (.mpd) stream for local hosting")]
@@ -50,6 +49,7 @@ impl Mirror {
     ///
     /// Uses the *master manifest’s URL path* as the base and preserves only the
     /// relative suffix under the output directory.
+    #[allow(unused_variables)]
     fn path_for_url(&mut self, url: &Url, is_manifest: bool) -> PathBuf {
         if let Some(existing) = self.url_to_path.get(url) {
             return existing.clone();
@@ -64,9 +64,9 @@ impl Mirror {
         let base = self.master_url_path_components.as_slice();
 
         // Find the relative difference:
-        // master = ["x","y","z","manifest.m3u8"]
-        // child  = ["x","y","z","sub","foo.m3u8"]
-        // -> rel_parts = ["sub","foo.m3u8"]
+        // master = ["x","y","z","manifest.ext"]
+        // child  = ["x","y","z","sub","foo.ext"]
+        // -> rel_parts = ["sub","foo.ext"]
         let mut idx = 0;
         while idx < base.len().saturating_sub(1)
             && idx < rel.len().saturating_sub(1)
@@ -80,9 +80,12 @@ impl Mirror {
         // Local path under output dir:
         let mut local_path = self.out_dir.join(rel_parts);
 
-        // Ensure manifest has a .m3u8 extension if it has none
-        if is_manifest && local_path.extension().is_none() {
-            local_path.set_extension("m3u8");
+        // Ensure HLS manifest has a .m3u8 extension if none is present
+        #[cfg(feature = "hls")]
+        {
+            if is_manifest && local_path.extension().is_none() {
+                local_path.set_extension("m3u8");
+            }
         }
 
         // Handle query string → safe filenames
@@ -113,22 +116,14 @@ impl Mirror {
         local_path
     }
 
-    fn to_posix_relative(target: &Path, base: &Path) -> String {
-        let rel = diff_paths(target, base).unwrap_or_else(|| target.to_path_buf());
+    #[cfg(feature = "hls")]
+    fn to_posix_relative(target: &std::path::Path, base: &std::path::Path) -> String {
+        let rel = pathdiff::diff_paths(target, base).unwrap_or_else(|| target.to_path_buf());
         let parts: Vec<String> = rel
             .components()
             .map(|c| c.as_os_str().to_string_lossy().to_string())
             .collect();
         parts.join("/")
-    }
-
-    fn find_uri_attr(line: &str) -> Option<(usize, usize)> {
-        let needle = "URI=\"";
-        let start_val = line.find(needle)? + needle.len();
-        let rest = &line[start_val..];
-        let end_rel = rest.find('"')?;
-        let end_val = start_val + end_rel;
-        Some((start_val, end_val))
     }
 
     async fn mirror_binary(&mut self, url: Url) -> Result<()> {
@@ -160,8 +155,21 @@ impl Mirror {
         Ok(())
     }
 
+    // ===== HLS (.m3u8) support =====
+
+    #[cfg(feature = "hls")]
+    fn find_uri_attr(line: &str) -> Option<(usize, usize)> {
+        let needle = "URI=\"";
+        let start_val = line.find(needle)? + needle.len();
+        let rest = &line[start_val..];
+        let end_rel = rest.find('"')?;
+        let end_val = start_val + end_rel;
+        Some((start_val, end_val))
+    }
+
     /// Mirror an HLS manifest (.m3u8), rewriting all URIs to local relative paths.
-    #[async_recursion]
+    #[cfg(feature = "hls")]
+    #[async_recursion::async_recursion]
     async fn mirror_manifest(&mut self, url: Url) -> Result<()> {
         if !self.visited.insert(url.clone()) {
             return Ok(());
@@ -276,7 +284,10 @@ impl Mirror {
         Ok(())
     }
 
+    // ===== DASH (.mpd) support =====
+
     /// Mirror a DASH MPD: save MPD as-is, but download all referenced segments / sidecars.
+    #[cfg(feature = "dash")]
     async fn mirror_mpd(&mut self, url: Url) -> Result<()> {
         if !self.visited.insert(url.clone()) {
             return Ok(());
@@ -385,15 +396,8 @@ impl Mirror {
                     let rep_st = first_child_element(&rep, "SegmentTemplate").or(aset_st);
 
                     if let Some(st) = rep_st {
-                        // Handle SegmentTemplate-based segments
-                        self.handle_segment_template(
-                            &mpd_url,
-                            &rep_base,
-                            &rep_id,
-                            st,
-                            mpd_duration_secs,
-                        )
-                        .await?;
+                        self.handle_segment_template(&rep_base, &rep_id, st, mpd_duration_secs)
+                            .await?;
                     }
 
                     // If there was a Representation BaseURL that looks like a file
@@ -409,9 +413,9 @@ impl Mirror {
     }
 
     /// Handle a <SegmentTemplate> for a given Representation.
+    #[cfg(feature = "dash")]
     async fn handle_segment_template(
         &mut self,
-        _mpd_url: &Url,
         base_url: &Url,
         representation_id: &str,
         st: Node<'_, '_>,
@@ -471,21 +475,22 @@ impl Mirror {
     }
 }
 
-/// Get the text of the first child element with given name, if any.
-fn first_child_text<'a>(node: &Node<'a, 'a>, name: &str) -> Option<String> {
+#[cfg(feature = "dash")]
+fn first_child_text(node: &Node, name: &str) -> Option<String> {
     node.children()
         .find(|n| n.is_element() && n.tag_name().name() == name)
         .and_then(|n| n.text())
         .map(|s| s.to_string())
 }
 
-/// Get the first child element with given name, if any.
-fn first_child_element<'a>(node: &Node<'a, 'a>, name: &str) -> Option<Node<'a, 'a>> {
+#[cfg(feature = "dash")]
+fn first_child_element<'a>(node: &'a Node<'a, 'a>, name: &'a str) -> Option<Node<'a, 'a>> {
     node.children()
         .find(|n| n.is_element() && n.tag_name().name() == name)
 }
 
 /// Parse a minimal ISO 8601 duration like "PT3M30.840S" into seconds.
+#[cfg(feature = "dash")]
 fn parse_iso8601_duration_seconds(s: &str) -> Option<f64> {
     if !s.starts_with("PT") {
         return None;
@@ -554,8 +559,30 @@ async fn main() -> Result<()> {
         .to_ascii_lowercase();
 
     match ext.as_str() {
-        "m3u8" => mirror.mirror_manifest(start_url).await?,
-        "mpd" => mirror.mirror_mpd(start_url).await?,
+        "m3u8" => {
+            #[cfg(feature = "hls")]
+            {
+                mirror.mirror_manifest(start_url).await?;
+            }
+            #[cfg(not(feature = "hls"))]
+            {
+                return Err(anyhow!(
+                    "HLS support not enabled (build with --features hls)"
+                ));
+            }
+        }
+        "mpd" => {
+            #[cfg(feature = "dash")]
+            {
+                mirror.mirror_mpd(start_url).await?;
+            }
+            #[cfg(not(feature = "dash"))]
+            {
+                return Err(anyhow!(
+                    "DASH support not enabled (build with --features dash)"
+                ));
+            }
+        }
         other => return Err(anyhow!("Unsupported start URL extension: {}", other)),
     }
 
